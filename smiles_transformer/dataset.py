@@ -23,7 +23,7 @@ class SmilesEnumerator(object):
         canonical: use canonical SMILES during transform (overrides enum)
     """
 
-    def __init__(self, charset=None, pad=120, leftpad=True, isomericSmiles=True, enum=True,
+    def __init__(self, charset=None, pad=120, leftpad=True, isomeric=True, enum=True,
                  canonical=False):
         if not charset:
             charset = '@C)(=cOn1S2/H[N]\\'
@@ -31,7 +31,7 @@ class SmilesEnumerator(object):
         self._charset = None
         self.pad = pad
         self.leftpad = leftpad
-        self.isomericSmiles = isomericSmiles
+        self.isomericSmiles = isomeric
         self.enumerate = enum
         self.canonical = canonical
 
@@ -134,8 +134,7 @@ class Seq2seqDataset(Dataset):
         return len(self.smiles)
 
     def __getitem__(self, item):
-        sm = self.smiles[item]
-        sm = self.transform(sm)  # List
+        sm = self.transform(self.smiles[item])  # List
         content = [self.vocab.stoi.get(token, self.vocab.unk_index) for token in sm]
         X = [self.vocab.sos_index] + content + [self.vocab.eos_index]
         padding = [self.vocab.pad_index] * (self.seq_len - len(X))

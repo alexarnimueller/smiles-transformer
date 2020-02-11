@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-from torch import nn
+from torch.nn import Module, Dropout, Embedding, Linear, Transformer
 from torch import optim
 from torch.autograd import Variable
 from torch.nn import functional as F
@@ -22,11 +22,11 @@ SOS = 3
 MASK = 4
 
 
-class PositionalEncoding(nn.Module):
+class PositionalEncoding(Module):
     """Implement the PE function. No batch support?"""
     def __init__(self, d_model, dropout, max_len=5000):
         super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = Dropout(p=dropout)
 
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model)  # (T,H)
@@ -42,17 +42,16 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class TrfmSeq2seq(nn.Module):
+class TrfmSeq2seq(Module):
     def __init__(self, in_size, hidden_size, out_size, n_layers, dropout=0.1):
         super(TrfmSeq2seq, self).__init__()
         self.in_size = in_size
         self.hidden_size = hidden_size
-        self.embed = nn.Embedding(in_size, hidden_size)
+        self.embed = Embedding(in_size, hidden_size)
         self.pe = PositionalEncoding(hidden_size, dropout)
-        self.trfm = nn.Transformer(d_model=hidden_size, nhead=4,
-                                   num_encoder_layers=n_layers, num_decoder_layers=n_layers,
-                                   dim_feedforward=hidden_size)
-        self.out = nn.Linear(hidden_size, out_size)
+        self.trfm = Transformer(d_model=hidden_size, nhead=4, num_encoder_layers=n_layers,
+                                num_decoder_layers=n_layers, dim_feedforward=hidden_size)
+        self.out = Linear(hidden_size, out_size)
 
     def forward(self, src):
         # src: (T,B)
@@ -108,6 +107,7 @@ def parse_arguments():
     parser.add_argument('--n_layer', '-l', type=int, default=4, help='number of layers')
     parser.add_argument('--n_head', type=int, default=4, help='number of attention heads')
     parser.add_argument('--lr', type=float, default=1e-4, help='Adam learning rate')
+    parser.add_argument('--test', '-t', default=10000, help='number of examples in test set')
     parser.add_argument('--gpu', metavar='N', type=int, nargs='+', help='list of GPU IDs to use')
     return parser.parse_args()
 
@@ -119,11 +119,9 @@ def evaluate(model, test_loader, vocab):
         sm = torch.t(sm.cuda())  # (T,B)
         with torch.no_grad():
             output = model(sm)  # (T,B,V)
-        loss = F.nll_loss(output.view(-1, len(vocab)),
-                          sm.contiguous().view(-1),
-                          ignore_index=PAD)
+        loss = F.nll_loss(output.view(-1, len(vocab)), sm.contiguous().view(-1), ignore_index=PAD)
         total_loss += loss.item()
-    return total_loss / len(test_loader)
+    return float(total_loss) / float(len(test_loader))
 
 
 def main():
@@ -133,8 +131,7 @@ def main():
     print('Loading dataset...')
     vocab = WordVocab.load_vocab(args.vocab)
     dataset = Seq2seqDataset(pd.read_csv(args.data)['canonical_smiles'].values, vocab)
-    test_size = 10000
-    train, test = torch.utils.data.random_split(dataset, [len(dataset) - test_size, test_size])
+    train, test = torch.utils.data.random_split(dataset, [len(dataset) - args.test_size, args.test_size])
     train_loader = DataLoader(train, batch_size=args.batch_size, shuffle=True, num_workers=args.n_worker)
     test_loader = DataLoader(test, batch_size=args.batch_size, shuffle=False, num_workers=args.n_worker)
     print('Train size:', len(train))
@@ -152,22 +149,21 @@ def main():
             sm = torch.t(sm.cuda())  # (T,B)
             optimizer.zero_grad()
             output = model(sm)  # (T,B,V)
-            loss = F.nll_loss(output.view(-1, len(vocab)),
-                              sm.contiguous().view(-1), ignore_index=PAD)
+            loss = F.nll_loss(output.view(-1, len(vocab)), sm.contiguous().view(-1), ignore_index=PAD)
             loss.backward()
             optimizer.step()
             if batch % 1000 == 0:
-                print('Train {:3d}: iter {:5d} | loss {:.3f} | ppl {:.3f}'.format(epoch, batch, loss.item(),
+                print('Train {:3d}: iter {:5d} | loss {:.4f} | ppl {:.4f}'.format(epoch, batch, loss.item(),
                                                                                   math.exp(loss.item())))
             if batch % 10000 == 0:
                 loss = evaluate(model, test_loader, vocab)
-                print('Val {:3d}: iter {:5d} | loss {:.3f} | ppl {:.3f}'.format(epoch, batch, loss, math.exp(loss)))
+                print('Val {:3d}: iter {:5d} | loss {:.4f} | ppl {:.4f}'.format(epoch, batch, loss, math.exp(loss)))
                 # Save the model if the validation loss is the best we've seen so far.
                 if not best_loss or loss < best_loss:
                     print("[!] saving model...")
-                    if not os.path.isdir(".save"):
-                        os.makedirs(".save")
-                    torch.save(model.state_dict(), './.save/trfm_new_%d_%d.pkl' % (epoch, batch))
+                    if not os.path.isdir("./save"):
+                        os.makedirs("./save")
+                    torch.save(model.state_dict(), './save/trfm_new_%d_%d.pkl' % (epoch, batch))
                     best_loss = loss
 
 
