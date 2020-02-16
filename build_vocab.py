@@ -1,48 +1,34 @@
 import argparse
 import pickle
 from collections import Counter
+from utils import split
 
 
 class TorchVocab(object):
-    """
-    :property freqs: collections.Counter, コーパス中の単語の出現頻度を保持するオブジェクト
-    :property stoi: collections.defaultdict, string → id の対応を示す辞書
-    :property itos: collections.defaultdict, id → string の対応を示す辞書
-    """
 
     def __init__(self, counter, max_size=None, min_freq=1, specials=None,
                  vectors=None, unk_init=None, vectors_cache=None):
-        """
-        :param counter: collections.Counter, データ中に含まれる単語の頻度を計測するためのcounter
-        :param max_size: int, vocabularyの最大のサイズ. Noneの場合は最大値なし. defaultはNone
-        :param min_freq: int, vocabulary中の単語の最低出現頻度. この数以下の出現回数の単語はvocabularyに加えられない.
-        :param specials: list of str, vocabularyにあらかじめ登録するtoken
-        :param vectors: list of vectors, 事前学習済みのベクトル. ex)Vocab.load_vectors
-        """
+
         self.freqs = counter
         counter = counter.copy()
         min_freq = max(min_freq, 1)
 
-        # special tokensの出現頻度はvocabulary作成の際にカウントされない
         if not specials:
-            specials = ['<pad>', '<oov>']
+            specials = [' ', '<oov>']
         self.itos = list(specials)
         for tok in specials:
             del counter[tok]
 
         max_size = None if max_size is None else max_size + len(self.itos)
 
-        # まず頻度でソートし、次に文字順で並び替える
         words_and_frequencies = sorted(counter.items(), key=lambda tup: tup[0])
         words_and_frequencies.sort(key=lambda tup: tup[1], reverse=True)
 
-        # 出現頻度がmin_freq未満のものはvocabに加えない
         for word, freq in words_and_frequencies:
             if freq < min_freq or len(self.itos) == max_size:
                 break
             self.itos.append(word)
 
-        # dictのk,vをいれかえてstoiを作成する
         self.stoi = {tok: i for i, tok in enumerate(self.itos)}
 
         self.vectors = None
@@ -83,14 +69,12 @@ class Vocab(TorchVocab):
         self.eos_index = 2
         self.sos_index = 3
         self.mask_index = 4
-        super().__init__(counter, specials=["<pad>", "<unk>", "<eos>", "<sos>", "<mask>"], max_size=max_size,
+        super().__init__(counter, specials=[" ", "<unk>", "<eos>", "^", "<mask>"], max_size=max_size,
                          min_freq=min_freq)
 
-    # override用
     def to_seq(self, sentece, seq_len, with_eos=False, with_sos=False) -> list:
         pass
 
-    # override用
     def from_seq(self, seq, join=False, with_pad=False):
         pass
 
@@ -104,10 +88,9 @@ class Vocab(TorchVocab):
             pickle.dump(self, f)
 
 
-# テキストファイルからvocabを作成する
 class WordVocab(Vocab):
     def __init__(self, texts, max_size=None, min_freq=1):
-        print("Building Vocab")
+        print("Building vocab...")
         counter = Counter()
         for line in texts:
             if isinstance(line, list):
@@ -158,18 +141,23 @@ class WordVocab(Vocab):
 
 def main():
     parser = argparse.ArgumentParser(description='Build a vocabulary pickle')
-    parser.add_argument('--in_path', '-i', type=str, default='data/chembl24.csv', help='path to the corpus')
-    parser.add_argument('--out_path', '-o', type=str, default='data/vocab.pkl', help='output file')
-    parser.add_argument('--min_freq', '-m', type=int, default=500, help='minimum frequency for vocabulary')
+    parser.add_argument('--in_path', '-i', type=str, default='.data/chembl24_corpus.txt', help='path to the corpus')
+    parser.add_argument('--out_path', '-o', type=str, default='.data/vocab.pkl', help='output file')
+    parser.add_argument('--min_freq', '-m', type=int, default=10, help='minimum frequency for vocabulary')
     parser.add_argument('--vocab_size', '-v', type=int, default=None, help='max vocabulary size')
     parser.add_argument('--encoding', '-e', type=str, default='utf-8', help='encoding of corpus')
     args = parser.parse_args()
 
-    with open(args.corpus_path, "r", encoding=args.encoding) as f:
-        vocab = WordVocab(f, max_size=args.vocab_size, min_freq=args.min_freq)
+    print("Reading file...")
+    with open(args.in_path, "r", encoding=args.encoding) as f:
+        text = str()
+        for line in f:
+            text += split(line) + '\n'
+        vocab = WordVocab(text, max_size=args.vocab_size, min_freq=args.min_freq)
 
-    print("VOCAB SIZE:", len(vocab))
+    print("Vocab size:", len(vocab))
     vocab.save_vocab(args.out_path)
+    print(vocab.stoi)
 
 
 if __name__ == '__main__':

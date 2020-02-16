@@ -7,44 +7,34 @@ import pandas as pd
 import torch
 from torch.nn import Module, Dropout, Embedding, Linear, Transformer
 from torch import optim
-from torch.autograd import Variable
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .build_vocab import WordVocab
-from .dataset import Seq2seqDataset
-
-PAD = 0
-UNK = 1
-EOS = 2
-SOS = 3
-MASK = 4
+from build_vocab import WordVocab
+from dataset import Seq2seqDataset
 
 
 class PositionalEncoding(Module):
-    """Implement the PE function. No batch support?"""
-    def __init__(self, d_model, dropout, max_len=5000):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = Dropout(p=dropout)
-
-        # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, d_model)  # (T,H)
-        position = torch.arange(0., max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0., d_model, 2) * -(math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
+        pe = pe.unsqueeze(0).transpose(0, 1)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        x = x + Variable(self.pe[:, :x.size(1)], requires_grad=False)
+        x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
 
-class TrfmSeq2seq(Module):
+class TrfmSmiles(Module):
     def __init__(self, in_size, hidden_size, out_size, n_layers, dropout=0.1):
-        super(TrfmSeq2seq, self).__init__()
+        super(TrfmSmiles, self).__init__()
         self.in_size = in_size
         self.hidden_size = hidden_size
         self.embed = Embedding(in_size, hidden_size)
@@ -93,25 +83,6 @@ class TrfmSeq2seq(Module):
             return out
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description='Hyperparams')
-    parser.add_argument('--n_epoch', '-e', type=int, default=5, help='number of epochs')
-    parser.add_argument('--vocab', '-v', type=str, default='data/vocab.pkl', help='vocabulary (.pkl)')
-    parser.add_argument('--data', '-d', type=str, default='data/chembl_25.csv', help='train corpus (.csv)')
-    parser.add_argument('--out-dir', '-o', type=str, default='../result', help='output directory')
-    parser.add_argument('--name', '-n', type=str, default='ST', help='model name')
-    parser.add_argument('--seq_len', type=int, default=220, help='maximum length of the paired seqence')
-    parser.add_argument('--batch_size', '-b', type=int, default=8, help='batch size')
-    parser.add_argument('--n_worker', '-w', type=int, default=16, help='number of workers')
-    parser.add_argument('--hidden', type=int, default=256, help='length of hidden vector')
-    parser.add_argument('--n_layer', '-l', type=int, default=4, help='number of layers')
-    parser.add_argument('--n_head', type=int, default=4, help='number of attention heads')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Adam learning rate')
-    parser.add_argument('--test', '-t', default=10000, help='number of examples in test set')
-    parser.add_argument('--gpu', metavar='N', type=int, nargs='+', help='list of GPU IDs to use')
-    return parser.parse_args()
-
-
 def evaluate(model, test_loader, vocab):
     model.eval()
     total_loss = 0
@@ -119,9 +90,28 @@ def evaluate(model, test_loader, vocab):
         sm = torch.t(sm.cuda())  # (T,B)
         with torch.no_grad():
             output = model(sm)  # (T,B,V)
-        loss = F.nll_loss(output.view(-1, len(vocab)), sm.contiguous().view(-1), ignore_index=PAD)
+        loss = F.nll_loss(output.view(-1, len(vocab)), sm.contiguous().view(-1), ignore_index=0)
         total_loss += loss.item()
     return float(total_loss) / float(len(test_loader))
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Hyperparams')
+    parser.add_argument('--n_epoch', '-e', type=int, default=5, help='number of epochs')
+    parser.add_argument('--vocab', '-v', type=str, default='.data/vocab.pkl', help='vocabulary (.pkl)')
+    parser.add_argument('--data', '-d', type=str, default='.data/chembl24_corpus.txt', help='train corpus')
+    parser.add_argument('--out-dir', '-o', type=str, default='.save', help='output directory')
+    parser.add_argument('--name', '-n', type=str, default='ST', help='model name')
+    parser.add_argument('--seq_len', type=int, default=220, help='maximum length of the paired seqence')
+    parser.add_argument('--batch_size', '-b', type=int, default=32, help='batch size')
+    parser.add_argument('--n_worker', '-w', type=int, default=16, help='number of workers')
+    parser.add_argument('--hidden', type=int, default=128, help='length of hidden vector')
+    parser.add_argument('--n_layer', '-l', type=int, default=3, help='number of layers')
+    parser.add_argument('--n_head', type=int, default=4, help='number of attention heads')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Adam learning rate')
+    parser.add_argument('--test_size', '-t', default=0.1, help='size of test set')
+    parser.add_argument('--gpu', metavar='N', type=int, nargs='+', help='list of GPU IDs to use')
+    return parser.parse_args()
 
 
 def main():
@@ -131,14 +121,14 @@ def main():
     print('Loading dataset...')
     vocab = WordVocab.load_vocab(args.vocab)
     dataset = Seq2seqDataset(pd.read_csv(args.data)['canonical_smiles'].values, vocab)
-    train, test = torch.utils.data.random_split(dataset, [len(dataset) - args.test_size, args.test_size])
+    train, test = torch.utils.data.random_split(dataset, [len(dataset) - int(len(dataset) * args.test_size),
+                                                          int(len(dataset) * args.test_size)])
     train_loader = DataLoader(train, batch_size=args.batch_size, shuffle=True, num_workers=args.n_worker)
     test_loader = DataLoader(test, batch_size=args.batch_size, shuffle=False, num_workers=args.n_worker)
     print('Train size:', len(train))
     print('Test size:', len(test))
     del dataset, train, test
-
-    model = TrfmSeq2seq(len(vocab), args.hidden, len(vocab), args.n_layer).cuda()
+    model = TrfmSmiles(len(vocab), args.hidden, len(vocab), args.n_layer).cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     print(model)
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
@@ -149,7 +139,7 @@ def main():
             sm = torch.t(sm.cuda())  # (T,B)
             optimizer.zero_grad()
             output = model(sm)  # (T,B,V)
-            loss = F.nll_loss(output.view(-1, len(vocab)), sm.contiguous().view(-1), ignore_index=PAD)
+            loss = F.nll_loss(output.view(-1, len(vocab)), sm.contiguous().view(-1), ignore_index=0)
             loss.backward()
             optimizer.step()
             if batch % 1000 == 0:
@@ -161,9 +151,9 @@ def main():
                 # Save the model if the validation loss is the best we've seen so far.
                 if not best_loss or loss < best_loss:
                     print("[!] saving model...")
-                    if not os.path.isdir("./save"):
-                        os.makedirs("./save")
-                    torch.save(model.state_dict(), './save/trfm_new_%d_%d.pkl' % (epoch, batch))
+                    if not os.path.isdir("./.save"):
+                        os.makedirs("./.save")
+                    torch.save(model.state_dict(), './.save/trfm_new_%d_%d.pkl' % (epoch, batch))
                     best_loss = loss
 
 
