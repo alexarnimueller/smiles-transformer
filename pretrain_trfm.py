@@ -3,7 +3,6 @@ import math
 import os
 
 import numpy as np
-import pandas as pd
 import torch
 from torch.nn import Module, Dropout, Embedding, Linear, Transformer
 from torch import optim
@@ -11,8 +10,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from build_vocab import WordVocab
-from dataset import Seq2seqDataset
+from utils import WordVocab, Seq2seqDataset, split
 
 
 class PositionalEncoding(Module):
@@ -33,13 +31,13 @@ class PositionalEncoding(Module):
 
 
 class TrfmSmiles(Module):
-    def __init__(self, in_size, hidden_size, out_size, n_layers, dropout=0.1):
+    def __init__(self, in_size, hidden_size, out_size, n_layers, nhead=4, dropout=0.1):
         super(TrfmSmiles, self).__init__()
         self.in_size = in_size
         self.hidden_size = hidden_size
         self.embed = Embedding(in_size, hidden_size)
         self.pe = PositionalEncoding(hidden_size, dropout)
-        self.trfm = Transformer(d_model=hidden_size, nhead=4, num_encoder_layers=n_layers,
+        self.trfm = Transformer(d_model=hidden_size, nhead=nhead, num_encoder_layers=n_layers,
                                 num_decoder_layers=n_layers, dim_feedforward=hidden_size)
         self.out = Linear(hidden_size, out_size)
 
@@ -98,13 +96,12 @@ def evaluate(model, test_loader, vocab):
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Hyperparams')
     parser.add_argument('--n_epoch', '-e', type=int, default=5, help='number of epochs')
-    parser.add_argument('--vocab', '-v', type=str, default='.data/vocab.pkl', help='vocabulary (.pkl)')
-    parser.add_argument('--data', '-d', type=str, default='.data/chembl24_corpus.txt', help='train corpus')
+    parser.add_argument('--data', '-d', type=str, default='.data/chembl24.txt', help='train corpus')
     parser.add_argument('--out-dir', '-o', type=str, default='.save', help='output directory')
     parser.add_argument('--name', '-n', type=str, default='ST', help='model name')
     parser.add_argument('--seq_len', type=int, default=220, help='maximum length of the paired seqence')
     parser.add_argument('--batch_size', '-b', type=int, default=32, help='batch size')
-    parser.add_argument('--n_worker', '-w', type=int, default=16, help='number of workers')
+    parser.add_argument('--n_worker', '-w', type=int, default=8, help='number of workers')
     parser.add_argument('--hidden', type=int, default=128, help='length of hidden vector')
     parser.add_argument('--n_layer', '-l', type=int, default=3, help='number of layers')
     parser.add_argument('--n_head', type=int, default=4, help='number of attention heads')
@@ -118,23 +115,41 @@ def main():
     args = parse_arguments()
     assert torch.cuda.is_available()
 
-    print('Loading dataset...')
-    vocab = WordVocab.load_vocab(args.vocab)
-    dataset = Seq2seqDataset(pd.read_csv(args.data)['canonical_smiles'].values, vocab)
+    print('\nLoading and preparing dataset...')
+    with open(args.data, "r") as f:
+        text = list()
+        smls = list()
+        for line in tqdm(f):
+            sl = split(line)
+            text.append(sl)
+            if len(sl) <= (args.seq_len - 2):
+                smls.append(line)
+        vocab = WordVocab(text, min_freq=5)
+    vocab.save_vocab('.data/vocab.pkl')
+    print("\nVocab size: %d" % len(vocab))
+    print(vocab.stoi)
+    print("\n%d examples are comply with seq_len of %d" % (len(smls), args.seq_len))
+
+    print("\nSplitting dataset into test and train...")
+    dataset = Seq2seqDataset(smls, vocab, seq_len=args.seq_len)
     train, test = torch.utils.data.random_split(dataset, [len(dataset) - int(len(dataset) * args.test_size),
                                                           int(len(dataset) * args.test_size)])
     train_loader = DataLoader(train, batch_size=args.batch_size, shuffle=True, num_workers=args.n_worker)
     test_loader = DataLoader(test, batch_size=args.batch_size, shuffle=False, num_workers=args.n_worker)
-    print('Train size:', len(train))
+    print('\nTrain size:', len(train))
     print('Test size:', len(test))
     del dataset, train, test
-    model = TrfmSmiles(len(vocab), args.hidden, len(vocab), args.n_layer).cuda()
+
+    print("\nBuilding model...")
+    model = TrfmSmiles(len(vocab), args.hidden, len(vocab), args.n_layer, nhead=args.n_head).cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     print(model)
-    print('Total parameters:', sum(p.numel() for p in model.parameters()))
+    print('\nTotal parameters:', sum(p.numel() for p in model.parameters()))
 
+    print("\nTraining...")
     best_loss = None
-    for epoch in range(1, args.n_epoch):
+    for epoch in range(1, 5):
+        print("\n----- Epoch %d -----" % epoch)
         for batch, sm in tqdm(enumerate(train_loader)):
             sm = torch.t(sm.cuda())  # (T,B)
             optimizer.zero_grad()
@@ -143,17 +158,17 @@ def main():
             loss.backward()
             optimizer.step()
             if batch % 1000 == 0:
-                print('Train {:3d}: iter {:5d} | loss {:.4f} | ppl {:.4f}'.format(epoch, batch, loss.item(),
-                                                                                  math.exp(loss.item())))
+                print(' Train Ep.{:3d}: iter {:5d} | loss {:.4f} | ppl {:.4f}'.format(epoch, batch, loss.item(),
+                                                                                      math.exp(loss.item())))
             if batch % 10000 == 0:
                 loss = evaluate(model, test_loader, vocab)
-                print('Val {:3d}: iter {:5d} | loss {:.4f} | ppl {:.4f}'.format(epoch, batch, loss, math.exp(loss)))
+                print(' Val Ep.{:3d}: iter {:5d} | loss {:.4f} | ppl {:.4f}'.format(epoch, batch, loss, math.exp(loss)))
                 # Save the model if the validation loss is the best we've seen so far.
                 if not best_loss or loss < best_loss:
                     print("[!] saving model...")
                     if not os.path.isdir("./.save"):
                         os.makedirs("./.save")
-                    torch.save(model.state_dict(), './.save/trfm_new_%d_%d.pkl' % (epoch, batch))
+                    torch.save(model.state_dict(), './.save/trfm_%d_%d.pkl' % (epoch, batch))
                     best_loss = loss
 
 
